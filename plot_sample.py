@@ -5,8 +5,25 @@ import matplotlib.pyplot as plt
 # =========================
 # LOAD DATA
 # =========================
-data = sio.loadmat('fault_dataset_13.mat', squeeze_me=True, struct_as_record=False)
-dataset = data['dataset']
+try:
+    data = sio.loadmat('fault_dataset_13_pu.mat')
+    print("Loaded pre-processed 'fault_dataset_13_pu.mat'")
+    signals = data['signals']
+    labels  = data['labels'].flatten()
+    lengths = data['lengths'].flatten()
+    
+    # Reconstruct the dataset structure for plotting
+    dataset = []
+    for i in range(len(labels)):
+        sig = signals[i, :lengths[i], :]
+        # Create a simple object to mimic the old structure
+        sample = type('sample', (object,), {'signal': sig, 'label': labels[i]})()
+        dataset.append(sample)
+
+except FileNotFoundError:
+    print("Could not find 'fault_dataset_13_pu.mat', trying 'fault_dataset_13.mat'.")
+    data = sio.loadmat('fault_dataset_13.mat', squeeze_me=True, struct_as_record=False)
+    dataset = data['dataset']
 
 print("Total samples:", len(dataset))
 
