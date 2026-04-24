@@ -11,33 +11,43 @@ import torch.backends.cudnn as cudnn
 # =========================
 # CONFIG
 # =========================
-WIN = 333          # 1 cycle @ 60 Hz (20kHz sampling)
+WIN = 333          # 1 cycle @ 60 Hz
 STRIDE = 50
 NUM_CLASSES = 13
-BATCH_SIZE = 256
+BATCH_SIZE = 512
 EPOCHS = 12
-DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
 
+DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
 cudnn.benchmark = True
 
 print("Device:", DEVICE)
 
 # =========================
-# LOAD DATASET
+# LOAD DATASET (ROBUST)
 # =========================
 data = sio.loadmat('fault_dataset_13.mat', squeeze_me=True, struct_as_record=False)
 
 dataset = data['dataset']
-V_BASE = float(data['V_BASE'])
-I_BASE = float(data['I_BASE'])
 
-print("Dataset size:", len(dataset))
+# SAFE BASE HANDLING
+def get_scalar(mat, name, default=1.0):
+    if name in mat:
+        val = mat[name]
+        try:
+            return float(np.array(val).squeeze())
+        except:
+            return default
+    return default
+
+V_BASE = get_scalar(data, 'V_BASE', 1.0)
+I_BASE = get_scalar(data, 'I_BASE', 1.0)
+
+print("V_BASE:", V_BASE, "I_BASE:", I_BASE)
 
 # =========================
 # RMS FUNCTION (FAST)
 # =========================
 def compute_rms(sig, win):
-    # sig: [N,6]
     sq = sig**2
     cumsum = np.cumsum(sq, axis=0)
 
@@ -52,7 +62,7 @@ def compute_rms(sig, win):
 # WINDOW CREATION (PARALLEL)
 # =========================
 def process_item(item):
-    sig = item.signal
+    sig = item.signal   # already PU
     lbl = int(item.label)
 
     X_local, Y_local = [], []
@@ -60,21 +70,20 @@ def process_item(item):
     if sig.shape[0] < WIN:
         return X_local, Y_local
 
-    # =% compute RMS
     rms_sig = compute_rms(sig, WIN)
 
     for i in range(0, sig.shape[0] - WIN, STRIDE):
-        raw_w = sig[i:i+WIN].T        # [6, WIN]
-        rms_w = rms_sig[i:i+WIN].T    # [6, WIN]
+        raw_w = sig[i:i+WIN].T
+        rms_w = rms_sig[i:i+WIN].T
 
-        combined = np.vstack([raw_w, rms_w])  # [12, WIN]
+        combined = np.vstack([raw_w, rms_w])  # 12×WIN
 
         X_local.append(combined)
         Y_local.append(lbl)
 
     return X_local, Y_local
 
-print("Creating windows with RMS...")
+print("Creating windows...")
 
 results = Parallel(n_jobs=-1)(
     delayed(process_item)(item) for item in dataset
@@ -143,7 +152,7 @@ val_loader = DataLoader(
 )
 
 # =========================
-# CNN MODEL (12 CHANNEL INPUT)
+# CNN MODEL (12-CHANNEL)
 # =========================
 class CNN(nn.Module):
     def __init__(self):
@@ -188,7 +197,7 @@ class CNN(nn.Module):
 model = CNN().to(DEVICE)
 
 # =========================
-# TRAINING SETUP
+# TRAINING
 # =========================
 criterion = nn.CrossEntropyLoss()
 optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
@@ -249,7 +258,7 @@ weights = {}
 for name, param in model.state_dict().items():
     weights[name] = param.cpu().numpy()
 
-sio.savemat('cnn_model_rms.mat', {
+sio.savemat('cnn_model_final.mat', {
     'weights': weights,
     'V_BASE': V_BASE,
     'I_BASE': I_BASE,
@@ -257,4 +266,4 @@ sio.savemat('cnn_model_rms.mat', {
     'channels': 12
 })
 
-print(" Saved cnn_model_rms.mat")
+print("✅ Saved cnn_model_final.mat")
