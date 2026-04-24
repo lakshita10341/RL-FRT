@@ -39,6 +39,57 @@ print(f"Device: {DEVICE}")
 
 FAULT_NAMES = ['NO','AG','BG','CG','AB','BC','CA','ABG','BCG','CAG','ABC','ABCG','HIF']
 
+# ── DATASET ───────────────────────────────────────────────────────
+class FaultDS(Dataset):
+    def __init__(self, X, Y):
+        # Add channel dim: [N, 1, 12, WIN]
+        self.X = torch.tensor(X).unsqueeze(1)
+        self.Y = torch.tensor(Y)
+    def __len__(self): return len(self.X)
+    def __getitem__(self, i): return self.X[i], self.Y[i]
+
+# ── CNN ───────────────────────────────────────────────────────────
+class FaultCNN(nn.Module):
+    """
+    Input:  [B, 1, 12, WIN]  — 1 channel, 12 signal rows, WIN time steps
+    Output: [B, 13]          — softmax logits
+
+    Architecture:
+    - [1×15] convs slide along TIME axis, extract waveform features
+    - [12×5] conv spans ALL signal rows — learns cross-phase patterns
+    - GlobalAvgPool → FC → 13 classes
+    """
+    def __init__(self, win=WIN):
+        super().__init__()
+        self.features = nn.Sequential(
+            # Time-axis feature extraction
+            nn.Conv2d(1,  32, kernel_size=(1, 7), padding=(0, 3)),
+            nn.BatchNorm2d(32), nn.ReLU(),
+
+            nn.Conv2d(32, 64, kernel_size=(1, 7), padding=(0, 3)),
+            nn.BatchNorm2d(64), nn.ReLU(),
+            nn.MaxPool2d(kernel_size=(1, 2)),   # WIN → WIN/2
+
+            nn.Conv2d(64, 128, kernel_size=(1, 5), padding=(0, 2)),
+            nn.BatchNorm2d(128), nn.ReLU(),
+            nn.MaxPool2d(kernel_size=(1, 2)),   # WIN/2 → WIN/4
+
+            # Cross-channel: span all 12 rows
+            nn.Conv2d(128, 256, kernel_size=(12, 3), padding=(0, 1)),
+            nn.BatchNorm2d(256), nn.ReLU(),
+
+            nn.AdaptiveAvgPool2d((1, 1))        # → [B, 256, 1, 1]
+        )
+        self.classifier = nn.Sequential(
+            nn.Flatten(),
+            nn.Linear(256, 128), nn.ReLU(),
+            nn.Dropout(0.4),
+            nn.Linear(128, NUM_CLASSES)
+        )
+
+    def forward(self, x):
+        return self.classifier(self.features(x))
+
 if __name__ == '__main__':
     # ── LOAD DATASET (auto PU conversion) ────────────────────────────
     from dataset_loader import load_dataset
@@ -112,61 +163,10 @@ if __name__ == '__main__':
     X_tr, X_va, y_tr, y_va = train_test_split(X, Y, test_size=0.2, stratify=Y)
     print(f"Train: {X_tr.shape}  Val: {X_va.shape}")
 
-    # ── DATASET ───────────────────────────────────────────────────────
-    class FaultDS(Dataset):
-        def __init__(self, X, Y):
-            # Add channel dim: [N, 1, 12, WIN]
-            self.X = torch.tensor(X).unsqueeze(1)
-            self.Y = torch.tensor(Y)
-        def __len__(self): return len(self.X)
-        def __getitem__(self, i): return self.X[i], self.Y[i]
-
     train_loader = DataLoader(FaultDS(X_tr, y_tr), BATCH_SIZE, shuffle=True,
                               num_workers=4, pin_memory=True)
     val_loader   = DataLoader(FaultDS(X_va, y_va), BATCH_SIZE, shuffle=False,
                               num_workers=4, pin_memory=True)
-
-    # ── CNN ───────────────────────────────────────────────────────────
-    class FaultCNN(nn.Module):
-        """
-        Input:  [B, 1, 12, WIN]  — 1 channel, 12 signal rows, WIN time steps
-        Output: [B, 13]          — softmax logits
-
-        Architecture:
-        - [1×15] convs slide along TIME axis, extract waveform features
-        - [12×5] conv spans ALL signal rows — learns cross-phase patterns
-        - GlobalAvgPool → FC → 13 classes
-        """
-        def __init__(self, win=WIN):
-            super().__init__()
-            self.features = nn.Sequential(
-                # Time-axis feature extraction
-                nn.Conv2d(1,  32, kernel_size=(1, 7), padding=(0, 3)),
-                nn.BatchNorm2d(32), nn.ReLU(),
-
-                nn.Conv2d(32, 64, kernel_size=(1, 7), padding=(0, 3)),
-                nn.BatchNorm2d(64), nn.ReLU(),
-                nn.MaxPool2d(kernel_size=(1, 2)),   # WIN → WIN/2
-
-                nn.Conv2d(64, 128, kernel_size=(1, 5), padding=(0, 2)),
-                nn.BatchNorm2d(128), nn.ReLU(),
-                nn.MaxPool2d(kernel_size=(1, 2)),   # WIN/2 → WIN/4
-
-                # Cross-channel: span all 12 rows
-                nn.Conv2d(128, 256, kernel_size=(12, 3), padding=(0, 1)),
-                nn.BatchNorm2d(256), nn.ReLU(),
-
-                nn.AdaptiveAvgPool2d((1, 1))        # → [B, 256, 1, 1]
-            )
-            self.classifier = nn.Sequential(
-                nn.Flatten(),
-                nn.Linear(256, 128), nn.ReLU(),
-                nn.Dropout(0.4),
-                nn.Linear(128, NUM_CLASSES)
-            )
-
-        def forward(self, x):
-            return self.classifier(self.features(x))
 
     model = FaultCNN().to(DEVICE)
     print(f"Model params: {sum(p.numel() for p in model.parameters()):,}")
