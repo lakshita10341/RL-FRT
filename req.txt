@@ -1,0 +1,10 @@
+numpy>=1.24
+scipy>=1.10
+scikit-learn>=1.3
+joblib>=1.3
+tqdm>=4.66
+
+# PyTorch (CPU version by default)
+torch>=2.1
+torchvision>=0.16
+torchaudio>=2.1
