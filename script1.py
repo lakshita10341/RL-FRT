@@ -3,12 +3,9 @@ train_cnn.py  —  13-class fault CNN, trains on fault_dataset_13.mat
 Exports to ONNX so MATLAB can load it via onnxruntime or Deep Learning Toolbox.
 
 FIXES vs original:
-[1] RMS computed correctly — original used cumsum which gives wrong RMS
-    for the first WIN samples. Fixed with a proper sliding window.
-[2] Input shape: original stacked raw+rms → [12×WIN]. Correct but the
-    Conv2d kernel (12,5) at the end must span all 12 rows. Fixed.
-[3] Dataset struct parsing — MATLAB cell arrays of structs load
-    differently depending on squeeze_me. Added robust parser.
+[1] RMS computed correctly — original used cumsum which gives wrong RMS for the first WIN samples. Fixed with a proper sliding window.
+[2] Input shape: original stacked raw+rms → [12×WIN]. Correct but the Conv2d kernel (12,5) at the end must span all 12 rows. Fixed.
+[3] Dataset struct parsing — MATLAB cell arrays of structs load differently depending on squeeze_me. Added robust parser.
 [4] Added ONNX export with correct dummy input shape for MATLAB inference.
 [5] Added per-class accuracy report so you know which fault types are weak.
 [6] Saves V_BASE, I_BASE, WIN into a separate .mat for buffer_block.
@@ -24,14 +21,15 @@ import torch.backends.cudnn as cudnn
 from tqdm import tqdm
 
 # ── CONFIG ────────────────────────────────────────────────────────
-WIN         = 50       # must match what MATLAB trained with originally
-             # if retraining fresh: set WIN = round(sample_rate/grid_freq)
-             # e.g. 400 for 20kHz/50Hz, 333 for 20kHz/60Hz
-STRIDE      = 10       # match original MATLAB STRIDE
+WIN         = 333       # must match what MATLAB trained with originally
+                        # if retraining fresh: set WIN = round(sample_rate/grid_freq)
+                        # e.g. 400 for 20kHz/50Hz, 333 for 20kHz/60Hz
+STRIDE      = 10        # match original MATLAB STRIDE
 NUM_CLASSES = 13
 BATCH_SIZE  = 256
 EPOCHS      = 25
 LR          = 1e-3
+NUM_WORKERS = 6         # CPU workers for dataloading
 
 DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
 cudnn.benchmark = True
@@ -163,10 +161,11 @@ if __name__ == '__main__':
     X_tr, X_va, y_tr, y_va = train_test_split(X, Y, test_size=0.2, stratify=Y)
     print(f"Train: {X_tr.shape}  Val: {X_va.shape}")
 
+    # Windows optimization: persistent_workers=True prevents worker recreation overhead
     train_loader = DataLoader(FaultDS(X_tr, y_tr), BATCH_SIZE, shuffle=True,
-                              num_workers=4, pin_memory=True)
+                              num_workers=NUM_WORKERS, pin_memory=True, persistent_workers=True)
     val_loader   = DataLoader(FaultDS(X_va, y_va), BATCH_SIZE, shuffle=False,
-                              num_workers=4, pin_memory=True)
+                              num_workers=NUM_WORKERS, pin_memory=True, persistent_workers=True)
 
     model = FaultCNN().to(DEVICE)
     print(f"Model params: {sum(p.numel() for p in model.parameters()):,}")
@@ -177,7 +176,8 @@ if __name__ == '__main__':
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=EPOCHS)
 
     use_amp = (DEVICE == 'cuda')
-    scaler  = torch.cuda.amp.GradScaler(enabled=use_amp)
+    # Modern PyTorch 2.x AMP syntax
+    scaler = torch.amp.GradScaler('cuda', enabled=use_amp)
 
     best_acc = 0.0
 
@@ -187,8 +187,11 @@ if __name__ == '__main__':
         for x, y in tqdm(train_loader, desc=f"Epoch {epoch+1}/{EPOCHS}", leave=False):
             x, y = x.to(DEVICE, non_blocking=True), y.to(DEVICE, non_blocking=True)
             optimizer.zero_grad()
-            with torch.cuda.amp.autocast(enabled=use_amp):
+            
+            # Modern PyTorch 2.x AMP syntax
+            with torch.amp.autocast('cuda', enabled=use_amp):
                 loss = criterion(model(x), y)
+            
             scaler.scale(loss).backward()
             scaler.step(optimizer)
             scaler.update()
@@ -224,7 +227,8 @@ if __name__ == '__main__':
     print("\nPer-class accuracy:")
     model.load_state_dict(torch.load('cnn_best.pt'))
     model.eval()
-    # recompute
+    
+    # Recompute
     per_class_correct = np.zeros(NUM_CLASSES)
     per_class_total   = np.zeros(NUM_CLASSES)
     with torch.no_grad():
